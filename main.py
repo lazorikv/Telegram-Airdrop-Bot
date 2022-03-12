@@ -61,6 +61,19 @@ def create_tables():
             pass
 
 
+def create_discord_username():
+    connection = get_connection()
+    with connection.cursor() as cursor:
+        try:
+            cursor.execute(
+                "ALTER TABLE users ADD COLUMN discord_username VARCHAR(100) after address"
+            )
+            print("Column discord_username created")
+            return create_discord_username
+        except:
+            pass
+
+
 def get_airdrop_wallets():
     connection = get_connection()
     with connection.cursor() as cursor:
@@ -88,6 +101,7 @@ default_keyboard.row(types.KeyboardButton("🚀 Join Airdrop"))
 
 airdrop_keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
 airdrop_keyboard.row(types.KeyboardButton("💼 View Wallet Address"))
+airdrop_keyboard.row(types.KeyboardButton("Add Discord username"))
 
 
 def cancel_button():
@@ -107,6 +121,34 @@ def update_wallet_address_button(message):
             InlineKeyboardButton(
                 f"Update Address ({address_changes}/{config.wallet_changes})",
                 callback_data="edit_wallet_address",
+            )
+        )
+        return markup
+
+
+@bot.message_handler(
+    func=lambda message: message.chat.type == "private" and message.text == "Update Discord Username"
+)
+def handle_text(message):
+    bot.send_message(
+        message.chat.id,
+        config.texts["discord_username"],
+        parse_mode="Markdown",
+        disable_web_page_preview=True
+    )
+    connection = get_connection()
+    with connection.cursor() as cursor:
+        sql = "SELECT discord_username FROM users WHERE user_id = %s"
+        cursor.execute(sql, message.chat.id)
+        try:
+            old_discord_username = cursor.fetchone()["discord_username"]
+            temp_message = f"Update Discord Username (previous - {old_discord_username})"
+        except KeyError:
+            temp_message = "Discord Username does not exist"
+        markup = InlineKeyboardMarkup()
+        markup.add(
+            InlineKeyboardButton(
+                temp_message,
             )
         )
         return markup
@@ -194,6 +236,20 @@ def handle_text(message):
             bot.register_next_step_handler(message, address_check)
 
 
+def discord_username(message):
+    bot.send_chat_action(message.chat.id, "typing")
+    connection = get_connection()
+    with connection.cursor() as cursor:
+        sql = "UPDATE users SET discord_username = %s WHERE user_id = %s"
+        cursor.execute(sql, (message.text, message.chat.id))
+        bot.reply_to(
+            message,
+            config.texts["discord_username_confirmation"],
+            parse_mode="Markdown",
+            reply_markup=airdrop_keyboard,
+        )
+
+
 @bot.message_handler(
     func=lambda message: message.chat.type == "private"
     and message.from_user.id in airdrop_users
@@ -260,6 +316,14 @@ def address_check(message):
                     parse_mode="Markdown",
                     disable_web_page_preview=True,
                 )
+
+                msg = bot.send_message(
+                    message.chat.id,
+                    config.texts["discord_username"],
+                    parse_mode="Markdown",
+                    reply_markup=cancel_button(),
+                )
+                bot.register_next_step_handler(msg, discord_username)
             except:
                 pass
         else:
@@ -345,6 +409,39 @@ def handle_text(message):
             return
 
 
+@bot.message_handler(
+    func=lambda message: message.chat.type == "private"
+    and message.text == "Add Discord username"
+)
+def handle_text(message):
+    markup = types.InlineKeyboardMarkup()
+    btn1 = types.InlineKeyboardButton(text='Cancel Operation', callback_data="cancel_input")
+    markup.add(btn1)
+    connection = get_connection()
+    with connection.cursor() as cursor:
+        sql = "SELECT discord_username FROM users WHERE user_id = %s"
+        cursor.execute(sql, message.chat.id)
+        try:
+            old_username = cursor.fetchone()["discord_username"]
+            btn2 = types.InlineKeyboardButton(text=f'Update Discord username\n\n(Old username - {old_username})',
+                                              callback_data="update_username_input")
+            markup.add(btn2)
+            bot.send_message(
+                message.chat.id,
+                config.texts["discord_username_exist"],
+                parse_mode="Markdown",
+                reply_markup=markup,
+            )
+        except:
+            msg = bot.send_message(
+                message.chat.id,
+                config.texts["discord_username"],
+                parse_mode="Markdown",
+                reply_markup=markup,
+            )
+            bot.register_next_step_handler(msg, discord_username)
+
+
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call):
     if call.data == "cancel_input":
@@ -394,6 +491,30 @@ def callback_query(call):
                     "⚠️ You can't change your address anymore.",
                     show_alert=True,
                 )
+    elif call.data == "update_username_input":
+        connection = get_connection()
+        with connection.cursor() as cursor:
+            sql = "SELECT discord_username FROM users WHERE user_id = %s"
+            cursor.execute(sql, call.message.chat.id)
+            try:
+                cursor.fetchone()["discord_username"]
+            except KeyError:
+                bot.send_message(
+                    chat_id=call.message.chat.id,
+                    text="Discord Username does not exist",
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                )
+        bot.send_message(
+            chat_id=call.message.chat.id,
+            text=config.texts["discord_username"],
+            parse_mode="Markdown",
+            reply_markup=cancel_button(),
+            disable_web_page_preview=True,
+        )
+        bot.register_next_step_handler(
+            call.message, discord_username
+        )
 
 
 create_db_tables = create_tables()
@@ -404,7 +525,7 @@ bot.enable_save_next_step_handlers(delay=2)
 bot.load_next_step_handlers()
 
 create_db_tables
-
+create_discord_username()
 # Remove webhook, it fails sometimes the set if there is a previous webhook
 bot.remove_webhook()
 
@@ -416,6 +537,7 @@ bot.set_webhook(
 # Build ssl context
 context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
 context.load_cert_chain(WEBHOOK_SSL_CERT, WEBHOOK_SSL_PRIV)
+
 
 # Process webhook calls
 async def handle(request):
@@ -429,6 +551,10 @@ async def handle(request):
 
 
 app.router.add_post("/{token}/", handle)
+
+# If the aihttp server does not work
+# bot.remove_webhook()
+# bot.infinity_polling()
 
 # Start aiohttp server
 web.run_app(
